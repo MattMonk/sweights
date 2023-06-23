@@ -4,6 +4,7 @@ import numpy as np
 from scipy.integrate import nquad
 from scipy.linalg import solve
 from scipy.interpolate import InterpolatedUnivariateSpline
+import time
 
 
 class SWeight:
@@ -21,6 +22,7 @@ class SWeight:
         rfobs=[],
         verbose=True,
         checks=True,
+        numpy_integrate=False,
     ):
         """
         Initialize SWeight object.
@@ -76,6 +78,10 @@ class SWeight:
             that the sum of all weights for a given component reproduces the
             yields. This will print additional output to the screen and issue
             warnings if checks are not passed.
+        numpy_integrate: bool, optional
+            If the data is one-dimensional, integrating with numpy trapz can be
+            much faster than the generic nquad integrator from Scipy. Only
+            usable if data is one-dimensional!
 
         Notes
         -----
@@ -212,9 +218,11 @@ class SWeight:
                           (pass int or float type)"
                     )
 
+        self.numpy_integrate = numpy_integrate
+
         self.ncomps = len(self.yields)
         if self.method != "roofit":
-            self.pdfnorms = [nquad(pdf, self.discvarranges)[0] for pdf in self.pdfs]
+            self.pdfnorms = [self._integrate_pdf(pdf, self.discvarranges) for pdf in self.pdfs]
             if checks:
                 print("    PDF normalisations:")
                 for i, norm in enumerate(self.pdfnorms):
@@ -284,10 +292,20 @@ class SWeight:
         if checks:
             self.print_checks()
 
+    def _integrate_pdf(self, integrand, limits):
+        if self.ndiscvars == 1 and self.numpy_integrate:
+            x = np.linspace(*limits[0], 500)
+            return np.trapz(integrand(x), x)
+        else:
+            return nquad(integrand, limits)[0]
+
     def _compute_W_matrix(self):
         self.Wkl = np.zeros((self.ncomps, self.ncomps))
         if self.method in ["refit", "subhess", "tsplot", "roofit"]:
             return self.Wkl
+        if self.method == "summation":
+            data_T = self.data.T
+            inv_pdfsum2 = 1.0 / self.pdfsum(*data_T) ** 2
         for i, di in enumerate(self.pdfs):
             dinorm = self.pdfnorms[i]
             for j, dj in enumerate(self.pdfs):
@@ -296,15 +314,17 @@ class SWeight:
                     self.Wkl[i, j] = self.Wkl[j, i]
                 else:
                     if self.method == "integration":
+                        norms_factor = 1.0 / (dinorm * djnorm)
                         self.Wkl[i, j] = nquad(
-                            lambda *args: (di(*args) / dinorm * dj(*args) / djnorm)
+                            lambda *args: (di(*args) * dj(*args) * norms_factor)
                             / self.pdfsum(*args),
                             self.discvarranges,
                         )[0]
                     elif self.method == "summation":
+                        norms_factor = 1.0 / (dinorm * djnorm)
                         self.Wkl[i, j] = np.sum(
-                            (di(*self.data.T) / dinorm * dj(*self.data.T) / djnorm)
-                            / self.pdfsum(*self.data.T) ** 2
+                            (di(*data_T) * dj(*data_T) * norms_factor)
+                            * inv_pdfsum2
                         )
                     else:
                         self.Wkl[i, j] = 0.0
@@ -449,12 +469,11 @@ class SWeight:
             self.intws = np.identity(self.ncomps)
             for i in range(self.ncomps):
                 for j in range(self.ncomps):
-                    self.intws[i, j] = nquad(
-                        lambda *args: self.get_weight(i, *args)
-                        * self.pdfs[j](*args)
-                        / self.pdfnorms[j],
-                        self.discvarranges,
-                    )[0]
+                    integrand = lambda *args: self.get_weight(i, *args) * self.pdfs[j](*args) / self.pdfnorms[j]
+                    self.intws[i, j] = self._integrate_pdf(
+                        integrand,
+                        self.discvarranges
+                    )
             print(
                 """    Integral of w*pdf matrix (should be close to the
                 identity):"""
