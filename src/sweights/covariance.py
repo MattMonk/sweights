@@ -1,7 +1,12 @@
 """Implementation of covariance correction for weighted fits."""
 
 import numpy as np
-from scipy.misc import derivative
+
+try:
+    from scipy.differentiate import derivative
+except ImportError:
+    # fallback for scipy versions older than 1.12.0
+    from scipy.misc import derivative
 
 # derivative of function pdf with respect to variable at index var
 # evaluated at point point
